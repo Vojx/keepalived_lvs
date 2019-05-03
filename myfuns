@@ -1,0 +1,108 @@
+#!/bin/bash
+
+#函数集,通过位置变量传递参数，使用简便
+
+##############################################################
+#给调度器的eth0:0配ip
+#proxy_eth0_0_create $VIP
+##############################################################
+proxy_eth0_0_create (){
+
+cat > /etc/sysconfig/network-scripts/"ifcfg-eth0:0"  << STA
+TYPE=Ethernet
+BOOTPROTO=none
+DEFROUTE=yes
+NAME=eth0:0
+DEVICE=eth0:0
+ONBOOT=yes
+IPADDR=$1
+PREFIX=24
+
+STA
+
+systemctl restart network
+
+}
+
+##############################################################
+#实现给调度器动态配置集群
+#proxy_ipvsadm_create  $VIP  $PORT
+##############################################################
+proxy_ipvsadm_create (){
+
+yum -y install ipvsadm    &> /dev/null
+
+ipvsadm -C
+
+ipvsadm  -A -t $1:$2 -s wrr
+
+cat > /etc/sysconfig/ipvsadm << END
+-A -t $1:$2 -s wrr
+END
+
+for RIP in $RIPS
+do
+
+ipvsadm -a -t $1:$2 -r $RIP:$2 -g
+
+cat >> /etc/sysconfig/ipvsadm << END
+-a -t $1:$2 -r $RIP:$2 -g
+END
+
+done
+
+}
+
+
+##############################################################
+#实现所有web的配置
+#all_web_config  $VIP  
+##############################################################
+all_web_config (){
+
+cd /opt
+
+cat > /opt/"ifcfg-lo:0"  << EOF
+DEVICE=lo:0
+IPADDR=$1
+NETMASK=255.255.255.255
+NETWORK=$1
+BROADCAST=$1
+ONBOOT=yes
+NAME=lo:0
+
+EOF
+
+
+cat > /opt/sysctl.conf << EOF
+net.ipv4.conf.all.arp_ignore = 1
+net.ipv4.conf.lo.arp_ignore = 1
+net.ipv4.conf.lo.arp_announce = 2
+net.ipv4.conf.all.arp_announce = 2
+
+EOF
+
+
+for RIP in $RIPS
+do
+        scp "/opt/ifcfg-lo:0"  root@$RIP:/etc/sysconfig/network-scripts/
+        scp /opt/sysctl.conf   root@$RIP:/etc/sysctl.conf
+        web_up_network $RIP
+done
+
+}
+
+##############################################################
+#给所有web起network服务，服务于all_web_config函数
+#web_up_network  $RIP
+##############################################################
+web_up_network (){
+rpm -q expect ||  yum -y install expect
+expect << EOF
+spawn ssh -o StrictHostKeyChecking=no $1
+expect "#"    { send "systemctl restart network\r" }           
+expect "#"    { send "sysctl -p\r" }           
+expect "#"    { send "exit\r" }
+expect "#"    { send "exit\r" }
+EOF
+}

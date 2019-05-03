@@ -1,0 +1,139 @@
+#!/bin/bash
+
+#此脚本针对Keepalived+LVS的高可用集群，在proxy1上执行
+
+#调用密钥配对脚本
+source ./key_match
+#调用函数集
+source ./myfuns
+
+PORT=`awk -F= '/PORT/{print $2}' data_keep_lvs.txt`
+MASTER=`awk -F= '/MASTER/{print $2}' data_keep_lvs.txt`
+
+LVS1=`awk -F= '/LVS1/{print $2}' data_keep_lvs.txt`
+LVS2=`awk -F= '/LVS2/{print $2}' data_keep_lvs.txt`
+LVS=`awk -F= '/LVS/{print $2}' data_keep_lvs.txt`
+
+VIP=`awk -F= '/VIP/{print $2}' data_keep_lvs.txt`
+
+RIP1=`awk -F= '/RIP1/{print $2}' data_keep_lvs.txt`
+RIP2=`awk -F= '/RIP2/{print $2}' data_keep_lvs.txt`
+RIPS=`awk -F= '/RIP/{print $2}' data_keep_lvs.txt`
+
+#需要远程的所有ip
+IPS=`awk -F= '/LVS|RIP/{print $2}' data_keep_lvs.txt`
+
+PASSWORD=1
+
+#实现无密码远程
+for ip in $IPS
+do
+ssh_copy_id $ip $PASSWORD
+done
+
+#实现所有web的配置
+all_web_config  $VIP  
+
+#调度器配置
+director_auto (){
+
+for i in $LVS
+
+do
+
+expect << EOF
+spawn ssh $i
+expect "#" { send "rpm -q keepalived || yum -y install keepalived\r" }
+expect "#" { send "rpm -q ipvsadm || yum install -y ipvsadm\r" }
+expect "#" { send "ipvsadm -C\r" }
+expect "#" { send "exit\r" }
+expect eof 
+EOF
+
+cat > /opt/${i}.conf << EOF
+    global_defs {
+      notification_email {
+        admin@tarena.com.cn            
+      }
+      notification_email_from ka@localhost 
+      smtp_server 127.0.0.1               
+      smtp_connect_timeout 30
+      router_id $i
+    }
+    vrrp_instance VI_1 {
+      state MASTER                      
+      interface eth0                   
+      virtual_router_id 50            
+      priority 100
+      advert_int 1
+      authentication {
+        auth_type pass
+        auth_pass 1111              
+      }
+      virtual_ipaddress {
+	     $VIP 
+      } 
+    }
+    virtual_server $VIP $PORT {      
+      delay_loop 6
+      lb_algo wrr                
+      lb_kind DR                
+      protocol TCP
+      real_server $RIP1 $PORT { 
+        weight 1            
+        TCP_CHECK {        
+        connect_timeout 3
+        nb_get_retry 3
+        delay_before_retry 3
+        }
+      }
+     real_server $RIP2 $PORT { 
+        weight 1
+        TCP_CHECK {
+        connect_timeout 3
+        nb_get_retry 3
+        delay_before_retry 3
+        }
+      }
+    }
+EOF
+
+done
+
+if [ "$MASTER" == "lvs1" ];then
+    sed -i '/state/s/MASTER/BACKUP/' /opt/${LVS2}.conf
+    sed -i '/priority/s/100/80/'     /opt/${LVS2}.conf
+elif [ "$MASTER" == "lvs2" ];then
+    sed -i '/state/s/MASTER/BACKUP/' /opt/${LVS1}.conf
+    sed -i '/priority/s/100/80/'     /opt/${LVS1}.conf
+else
+    echo "你的输入不正确！！！"
+fi
+
+for i in $LVS
+do
+
+scp /opt/${i}.conf $i:/etc/keepalived/keepalived.conf
+
+expect << EOF
+spawn ssh $i
+expect "#" { send "systemctl restart keepalived\r" }
+expect "#" { send "systemctl enable keepalived\r" }
+expect "#" { send "iptables -F\r" }
+expect "#" { send "setenforce 0  &>  /dev/null\r" }
+expect "#" { send "exit\r" }
+expect eof 
+EOF
+
+done
+
+
+
+
+
+}
+
+
+director_auto
+
+
